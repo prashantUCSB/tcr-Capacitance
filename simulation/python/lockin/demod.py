@@ -66,7 +66,13 @@ class DemodChannel:
 
         self._post_cic_i = CICDecimator(self.post_dec_R, N=self.post_cic_stages, M=1)
         self._post_cic_q = CICDecimator(self.post_dec_R, N=self.post_cic_stages, M=1)
-        self.fs_out = fs_mid / self.post_dec_R
+        fs_cic = fs_mid / self.post_dec_R
+
+        # Extra integer decimation applied after CIC, before FIR.
+        # Keeps FIR taps to ~200-400 regardless of the ratio fs_cic/lpf_bw_hz.
+        # Target: fs_fir ≈ lpf_bw_hz * 20 (at most). CIC provides anti-aliasing.
+        self._extra_dec = max(1, int(np.ceil(fs_cic / max(self.lpf_bw_hz * 20.0, 1.0))))
+        self.fs_out = fs_cic / self._extra_dec
 
         lpf_taps = design_lowpass_fir(self.fs_out, self.lpf_bw_hz)
         self._lpf_i = FIRFilter(lpf_taps)
@@ -91,6 +97,10 @@ class DemodChannel:
 
         i_dec = self._post_cic_i.process(i_raw)
         q_dec = self._post_cic_q.process(q_raw)
+
+        if self._extra_dec > 1:
+            i_dec = i_dec[::self._extra_dec]
+            q_dec = q_dec[::self._extra_dec]
 
         I_out = self._lpf_i.process(i_dec)
         Q_out = self._lpf_q.process(q_dec)

@@ -87,11 +87,12 @@ class LockInChain:
         # is fully elapsed before we start averaging.  Use 3× the group delay as the
         # settle window (1× to get past transient, 2× for averaging), capped at 500 k
         # input samples to keep simulation fast.
-        fir_group_delay_out = int(
-            np.ceil(self._demod.channels[0]._lpf_i.group_delay_samples)
-        )
-        settle_out = max(fir_group_delay_out * 3, int(np.ceil(self.fs_out / params.lpf_bw_hz * 3)))
-        self._block_size = min(max(settle_out * params.post_dec_R, 4096), 500_000)
+        ch0 = self._demod.channels[0]
+        fir_group_delay_out = int(np.ceil(ch0._lpf_i.group_delay_samples))
+        total_dec = params.post_dec_R * ch0._extra_dec
+        settle_out = max(fir_group_delay_out * 3,
+                         int(np.ceil(self.fs_out / params.lpf_bw_hz * 3)))
+        self._block_size = min(max(settle_out * total_dec, 4096), 500_000)
 
     def _simulate_tia_output(
         self, n_samples: int, Cp_F: float, Gp_S: float, tone_idx: int

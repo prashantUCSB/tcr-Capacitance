@@ -150,7 +150,9 @@ device = MOSCapParams(
     T_K=T_K,
 )
 Cox_fF    = device.Cox_F * 1e15
-fs_out_hz = fs_in / dec_idx
+fs_cic    = fs_in / dec_idx                        # rate after CIC
+extra_dec = max(1, int(np.ceil(fs_cic / max(lpf_bw_hz * 20.0, 1.0))))
+fs_out_hz = fs_cic / extra_dec                     # rate at FIR input
 omega     = 2 * np.pi * f0
 
 # Theoretical noise budget
@@ -162,20 +164,19 @@ sigma_C_adc = 2 * (lsb / np.sqrt(12)) * np.sqrt(lpf_bw_hz / (fs_in / 2)) / (
 sigma_C_tot = np.sqrt(sigma_C_In**2 + sigma_C_Vn**2 + sigma_C_adc**2)
 
 signal_V = Vexc_mV * 1e-3 * omega * device.Cox_F * Rf
-snr_db   = 20 * np.log10(max(signal_V, 1e-20) / max(sigma_C_tot * 1e-15 * Vexc_mV * 1e-3 * omega * Rf / 2, 1e-20))
 
 # ── Key metric row ────────────────────────────────────────────────────────────
 
 m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Cox",              f"{Cox_fF:.2f} fF")
-m2.metric("fs_out",           f"{fs_out_hz/1e3:.2f} kHz")
+m2.metric("fs_fir",           f"{fs_out_hz/1e3:.2f} kHz",
+          help=f"After CIC×{dec_idx} + extra dec×{extra_dec}")
 m3.metric("σ_C total (1σ)",   f"{sigma_C_tot:.4f} fF")
 m4.metric("Dominant noise",
           "Vn" if sigma_C_Vn > max(sigma_C_In, sigma_C_adc) else
           "In" if sigma_C_In > sigma_C_adc else "ADC")
-m5.metric("TIA signal @ Cox", f"{signal_V*1e6:.2f} µV")
-m6.metric("Rf optimal",
-          f"{Vn_nV*1e-9 / (In_fA*1e-15) / 1e3:.0f} kΩ")
+m5.metric("FIR taps",         f"≈{int(round(fs_out_hz / lpf_bw_hz * 11)):,}")
+m6.metric("Rf optimal",       f"{Vn_nV*1e-9 / (In_fA*1e-15) / 1e3:.0f} kΩ")
 
 # ── Tab layout ────────────────────────────────────────────────────────────────
 
@@ -304,6 +305,7 @@ with tab_diag:
         lpf_bw_hz=lpf_bw_hz,
         Cox_fF=Cox_fF,
         area_um2=area_um2,
+        extra_dec=extra_dec,
     )
     st.pyplot(fig_diag, use_container_width=True)
     plt_module = __import__("matplotlib.pyplot", fromlist=["close"])
@@ -336,80 +338,129 @@ with tab_diag:
 
 with tab_filter:
     st.subheader("CIC Decimation Filter Response")
+    # Show only up to 3× the CIC output Nyquist — the interesting passband/alias region
     f_cic, h_cic = cic_frequency_response(R=dec_idx, N=4, M=1, fs=fs_in, n_points=8192)
+    cic_nyq_mhz  = fs_cic / 2 / 1e6
+    x_max_mhz    = min(cic_nyq_mhz * 4, fs_in / 2 / 1e6)
+    mask         = f_cic / 1e6 <= x_max_mhz
     fig_cic = go.Figure()
-    fig_cic.add_trace(go.Scatter(x=f_cic / 1e6, y=h_cic, name="CIC (N=4)",
+    fig_cic.add_trace(go.Scatter(x=f_cic[mask] / 1e6, y=h_cic[mask], name=f"CIC R={dec_idx} N=4",
                                  line=dict(color="royalblue")))
     fig_cic.add_vline(x=f0 / 1e6, line_dash="dash", line_color="red",
-                      annotation_text=f"f₀={f0/1e6:.2f}MHz")
-    fig_cic.add_vline(x=(fs_out_hz / 2) / 1e6, line_dash="dot", line_color="orange",
-                      annotation_text=f"Nyquist out={fs_out_hz/2/1e6:.3f}MHz")
-    fig_cic.add_hline(y=-40, line_dash="dot", line_color="gray", annotation_text="-40 dB")
+                      annotation_text=f"f₀={f0/1e6:.2f} MHz",
+                      annotation_position="top right")
+    fig_cic.add_vline(x=cic_nyq_mhz, line_dash="dot", line_color="orange",
+                      annotation_text=f"CIC Nyquist = {cic_nyq_mhz*1e3:.0f} kHz",
+                      annotation_position="top left")
+    fig_cic.add_hline(y=-60, line_dash="dot", line_color="gray",
+                      annotation_text="-60 dB", annotation_position="bottom right")
     fig_cic.update_layout(
-        title=f"CIC Filter  R={dec_idx}, N=4  |  fs_in={fs_in/1e6:.0f} MHz → fs_out={fs_out_hz/1e3:.1f} kHz",
+        title=(f"CIC  R={dec_idx}, N=4  |  "
+               f"fs_in={fs_in/1e6:.0f} MHz → fs_cic={fs_cic/1e3:.1f} kHz  |  "
+               f"Extra dec ×{extra_dec} → fs_fir={fs_out_hz/1e3:.2f} kHz"),
         xaxis_title="Frequency (MHz)", yaxis_title="Magnitude (dB)",
-        yaxis_range=[-120, 5], height=380)
+        yaxis_range=[-100, 5], height=380,
+        xaxis=dict(range=[0, x_max_mhz]))
     st.plotly_chart(fig_cic, use_container_width=True)
 
     st.subheader("Post-Demodulation FIR LPF")
     from scipy import signal as sps
     lpf_taps = design_lowpass_fir(fs_out_hz, lpf_bw_hz)
     f_lpf, h_lpf = sps.freqz(lpf_taps, worN=4096, fs=fs_out_hz)
+    bw_label_fir = f"{lpf_bw_hz/1e3:.1f} kHz" if lpf_bw_hz >= 1000 else f"{lpf_bw_hz:.2f} Hz"
     fig_lpf = go.Figure()
     fig_lpf.add_trace(go.Scatter(x=f_lpf, y=20 * np.log10(np.abs(h_lpf) + 1e-300),
                                  name="FIR LPF", line=dict(color="seagreen")))
     fig_lpf.add_vline(x=lpf_bw_hz, line_dash="dash", line_color="red",
-                      annotation_text=f"BW={lpf_bw_hz:.1f}Hz")
+                      annotation_text=f"BW = {bw_label_fir}",
+                      annotation_position="top right")
+    fig_lpf.add_hline(y=-60, line_dash="dot", line_color="gray",
+                      annotation_text="-60 dB", annotation_position="bottom right")
+    gd_ms = (len(lpf_taps) - 1) / 2 / fs_out_hz * 1000
     fig_lpf.update_layout(
-        title=f"Post-demod LPF  BW={lpf_bw_hz:.1f}Hz  |  {len(lpf_taps)} taps  |  "
-              f"group delay {(len(lpf_taps)-1)/2/fs_out_hz*1000:.2f}ms",
+        title=(f"FIR LPF  BW={bw_label_fir}  |  {len(lpf_taps)} taps  |  "
+               f"Group delay {gd_ms:.2f} ms  |  fs={fs_out_hz/1e3:.2f} kHz"),
         xaxis_title="Frequency (Hz)", yaxis_title="Magnitude (dB)",
-        yaxis_range=[-100, 5], height=380)
+        yaxis_range=[-100, 5], height=380,
+        xaxis=dict(range=[0, min(fs_out_hz / 2, lpf_bw_hz * 20)]))
     st.plotly_chart(fig_lpf, use_container_width=True)
+    total_dec = dec_idx * extra_dec
     st.caption(
-        f"FIR taps: {len(lpf_taps)}  ·  Group delay: {(len(lpf_taps)-1)/2/fs_out_hz*1000:.2f} ms  ·  "
-        f"Required block size: ≥ {int(np.ceil((len(lpf_taps)-1)/2*3))*dec_idx:,} input samples")
+        f"FIR taps: {len(lpf_taps)}  ·  Group delay: {gd_ms:.2f} ms  ·  "
+        f"Total decimation: ×{total_dec} (CIC×{dec_idx} + extra×{extra_dec})  ·  "
+        f"Min block: ≥ {int(np.ceil((len(lpf_taps)-1)/2*3)) * total_dec:,} input samples"
+    )
 
 # ── Tab: Noise Budget ─────────────────────────────────────────────────────────
 
 with tab_noise:
     st.subheader("Noise Budget vs. Lock-in Bandwidth")
-    bw_range = np.logspace(-1, 5, 400)
+
+    bw_range      = np.logspace(-1, 5, 500)
     noise_In_arr  = 2*(In_fA*1e-15)*np.sqrt(bw_range)/(Vexc_mV*1e-3*omega)*1e15
     noise_Vn_arr  = 2*(Vn_nV*1e-9) *np.sqrt(bw_range)/(Vexc_mV*1e-3*omega*Rf)*1e15
     noise_adc_arr = 2*(lsb/np.sqrt(12))*np.sqrt(bw_range/(fs_in/2))/(Vexc_mV*1e-3*omega*Rf)*1e15
     noise_tot_arr = np.sqrt(noise_In_arr**2 + noise_Vn_arr**2 + noise_adc_arr**2)
 
-    fig_nb = go.Figure()
-    fig_nb.add_trace(go.Scatter(x=bw_range, y=noise_In_arr,  name=f"In = {In_fA:.1f} fA/√Hz",
-                                line=dict(color="steelblue", dash="dash")))
-    fig_nb.add_trace(go.Scatter(x=bw_range, y=noise_Vn_arr,  name=f"Vn = {Vn_nV:.1f} nV/√Hz",
-                                line=dict(color="darkorange", dash="dash")))
-    fig_nb.add_trace(go.Scatter(x=bw_range, y=noise_adc_arr, name=f"ADC {adc_bits}-bit quant.",
-                                line=dict(color="purple", dash="dot")))
-    fig_nb.add_trace(go.Scatter(x=bw_range, y=noise_tot_arr, name="Total (RSS)",
-                                line=dict(color="crimson", width=3)))
-    fig_nb.add_hline(y=1.0,  line_dash="dash", line_color="green",
-                     annotation_text="1 fF target", annotation_position="right")
-    fig_nb.add_hline(y=0.1,  line_dash="dash", line_color="limegreen",
-                     annotation_text="0.1 fF target", annotation_position="right")
-    fig_nb.add_vline(x=lpf_bw_hz, line_dash="solid", line_color="gray",
-                     annotation_text=f"Current BW={lpf_bw_hz:.1f}Hz")
-    # Rf crossover annotation
     Rf_opt = (Vn_nV * 1e-9) / (In_fA * 1e-15)
-    if Rf < Rf_opt * 0.99:
-        note = f"Rf < Rf_opt ({Rf_opt/1e3:.0f} kΩ) → Vn dominates"
-    elif Rf > Rf_opt * 1.01:
-        note = f"Rf > Rf_opt ({Rf_opt/1e3:.0f} kΩ) → In dominates"
-    else:
-        note = "Rf ≈ Rf_opt — equal noise contributions"
-    fig_nb.add_annotation(x=1, y=0.8, text=note, xref="paper", yref="paper",
-                          showarrow=False, bgcolor="white", bordercolor="gray",
-                          font=dict(size=11))
+
+    fig_nb = go.Figure()
+    fig_nb.add_trace(go.Scatter(
+        x=bw_range, y=noise_tot_arr, name="Total σ_C (RSS)",
+        line=dict(color="crimson", width=3)))
+    fig_nb.add_trace(go.Scatter(
+        x=bw_range, y=noise_Vn_arr,
+        name=f"Vn = {Vn_nV:.1f} nV/√Hz",
+        line=dict(color="darkorange", width=1.5, dash="dash")))
+    fig_nb.add_trace(go.Scatter(
+        x=bw_range, y=noise_In_arr,
+        name=f"In = {In_fA:.1f} fA/√Hz",
+        line=dict(color="steelblue", width=1.5, dash="dash")))
+    fig_nb.add_trace(go.Scatter(
+        x=bw_range, y=noise_adc_arr,
+        name=f"ADC {adc_bits}-bit",
+        line=dict(color="mediumpurple", width=1.5, dash="dot")))
+
+    # Target lines — use shapes so they stay on the log scale cleanly
+    for y_val, col, lbl in [(1.0, "green", "1 fF"), (0.1, "seagreen", "0.1 fF")]:
+        fig_nb.add_shape(type="line", x0=0.1, x1=1e5, y0=y_val, y1=y_val,
+                         line=dict(color=col, dash="dot", width=1.5))
+        fig_nb.add_annotation(x=np.log10(1e5), y=np.log10(y_val),
+                               text=f"  {lbl}", showarrow=False,
+                               xref="x", yref="y",
+                               font=dict(color=col, size=10))
+
+    # Current BW marker
+    fig_nb.add_shape(type="line",
+                     x0=lpf_bw_hz, x1=lpf_bw_hz,
+                     y0=1e-4, y1=1e3,
+                     line=dict(color="gray", dash="solid", width=1.5))
+    fig_nb.add_annotation(
+        x=np.log10(lpf_bw_hz), y=np.log10(max(noise_tot_arr.max() * 0.5, 1e-3)),
+        text=f"  BW={lpf_bw_hz:.1g} Hz<br>  σ={sigma_C_tot:.3f} fF",
+        showarrow=False, xref="x", yref="y",
+        bgcolor="rgba(255,255,255,0.8)", bordercolor="gray",
+        font=dict(size=10))
+
+    dom_label = ("Vn dominates — increase Rf above "
+                 f"{Rf_opt/1e3:.0f} kΩ to help"
+                 if Rf < Rf_opt * 0.99 else
+                 "In dominates — reduce Rf below "
+                 f"{Rf_opt/1e3:.0f} kΩ to help"
+                 if Rf > Rf_opt * 1.01 else
+                 "Rf ≈ Rf_opt — balanced noise contributions")
     fig_nb.update_layout(
-        title="Theoretical σ_C vs. Lock-in Bandwidth",
-        xaxis_title="Lock-in Bandwidth (Hz)", yaxis_title="σ_C (fF)",
-        xaxis_type="log", yaxis_type="log", height=500)
+        title=f"σ_C vs. BW  |  {dom_label}",
+        xaxis=dict(title="Lock-in Bandwidth (Hz)", type="log",
+                   tickformat=".0e", showgrid=True, gridcolor="#EEEEEE"),
+        yaxis=dict(title="σ_C  (fF, 1σ)", type="log",
+                   tickformat=".1e", showgrid=True, gridcolor="#EEEEEE",
+                   range=[-4, 3]),
+        height=480,
+        legend=dict(x=0.02, y=0.98, bgcolor="rgba(255,255,255,0.85)",
+                    bordercolor="lightgray", borderwidth=1),
+        plot_bgcolor="white",
+    )
     st.plotly_chart(fig_nb, use_container_width=True)
 
     # Crossings table
@@ -447,10 +498,10 @@ with tab_chain:
         "Value": [
             f"{f0_MHz:.3f} MHz", f"{Vexc_mV:.1f} mV rms",
             f"{fs_in/1e6:.1f} MHz", str(dec_idx), "4",
-            f"{fs_out_hz/1e3:.3f} kHz", f"{lpf_bw_hz:.2f} Hz",
+            f"{fs_out_hz:.1f} Hz  (CIC×{dec_idx} + extra×{extra_dec})", f"{lpf_bw_hz:.2f} Hz",
             f"~{len(design_lowpass_fir(fs_out_hz, lpf_bw_hz))}",
             f"{(len(design_lowpass_fir(fs_out_hz, lpf_bw_hz))-1)/2/fs_out_hz*1e3:.2f} ms",
-            f"≥{int(np.ceil((len(design_lowpass_fir(fs_out_hz, lpf_bw_hz))-1)/2*3)*dec_idx):,}",
+            f"≥{int(np.ceil((len(design_lowpass_fir(fs_out_hz, lpf_bw_hz))-1)/2*3)) * dec_idx * extra_dec:,}",
             f"{Rf_kohm:.3f} kΩ  ({20*np.log10(Rf):.0f} dBΩ)",
             f"{In_fA:.2f} fA/√Hz",
             f"{Vn_nV:.1f} nV/√Hz",
