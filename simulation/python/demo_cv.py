@@ -125,3 +125,4 @@ print(f"\nMeasurement statistics:")
 print(f"  RMS error:  {np.sqrt(np.mean(error_fF**2)):.3f} fF")
 print(f"  Max error:  {np.max(np.abs(error_fF)):.3f} fF")
 print(f"  Cox meas:   {np.max(C_measured)*1e15:.2f} fF (true: {device.Cox_F*1e15:.2f} fF)")
+
