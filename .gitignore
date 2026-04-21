@@ -1,0 +1,48 @@
+# Vivado project files
+*.jou
+*.log
+*.str
+*.dcp
+*.bit
+*.ltx
+*.mcs
+*.prm
+.Xil/
+vivado_*.backup.jou
+vivado_*.backup.log
+*_synth_*/
+*_impl_*/
+*_sim_*/
+*.runs/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.sim/
+*.gen/
+*.xpr.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+.pytest_cache/
+
+# Node/frontend
+node_modules/
+.next/
+dist/
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*~
